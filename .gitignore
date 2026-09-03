@@ -1,0 +1,19 @@
+# AWS / local
+*.pem
+.env
+.env.*
+*.tfstate*
+
+# CFN packaging output
+packaged-*.yaml
+
+# OS
+.DS_Store
+
+# Editor
+.vscode/
+.idea/
+
+# Kiro local settings (machine-specific)
+.kiro/settings/
+.kiro/agents/

@@ -1,0 +1,235 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: "kiro-remote-crew — VPC, subnets (two AZs), and fck-nat for private egress."
+
+Parameters:
+  TagPrefix:
+    Type: String
+    Default: co
+    AllowedPattern: "^[a-z][a-z0-9]{0,15}$"
+    Description: Lowercase namespace prefix for co:-style tag keys.
+  FckNatInstanceType:
+    Type: String
+    Default: t4g.nano
+    Description: fck-nat instance type (t4g.nano is ample for a single dev box).
+  FckNatAmiId:
+    Type: AWS::EC2::Image::Id
+    Description: >-
+      fck-nat AMI id for this region. fck-nat does NOT publish an SSM public
+      parameter, so deploy.sh resolves the latest AMI by owner (568608671756)
+      + name (fck-nat-al2023-*-<arch>-ebs) via `aws ec2 describe-images` and
+      passes it here. See https://fck-nat.dev/stable/deploying/.
+
+Resources:
+  Vpc:
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock: 10.20.0.0/16
+      EnableDnsSupport: true
+      EnableDnsHostnames: true
+      Tags:
+        - { Key: "Name", Value: !Sub "${TagPrefix}-kiro-remote-crew" }
+        - { Key: !Sub "${TagPrefix}:project", Value: "kiro-remote-crew" }
+        - { Key: !Sub "${TagPrefix}:managed-by", Value: "cloudformation" }
+
+  InternetGateway:
+    Type: AWS::EC2::InternetGateway
+    Properties:
+      Tags:
+        - { Key: "Name", Value: !Sub "${TagPrefix}-kiro-remote-crew" }
+
+  IgwAttachment:
+    Type: AWS::EC2::VPCGatewayAttachment
+    Properties:
+      VpcId: !Ref Vpc
+      InternetGatewayId: !Ref InternetGateway
+
+  # --- Subnets: two public (AZ-a holds the fck-nat, AZ-b empty but real) and
+  #     two private (AZ-a holds the host, AZ-b empty but real). The empty AZ-b
+  #     subnets are genuine resources, not commented blocks, so a later
+  #     multi-AZ extension is additive.
+  PublicSubnetA:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref Vpc
+      CidrBlock: 10.20.0.0/20
+      AvailabilityZone: !Select [0, !GetAZs ""]
+      Tags:
+        - { Key: "Name", Value: !Sub "${TagPrefix}-kiro-remote-crew-public-a" }
+        - { Key: !Sub "${TagPrefix}:project", Value: "kiro-remote-crew" }
+
+  PublicSubnetB:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref Vpc
+      CidrBlock: 10.20.16.0/20
+      AvailabilityZone: !Select [1, !GetAZs ""]
+      Tags:
+        - { Key: "Name", Value: !Sub "${TagPrefix}-kiro-remote-crew-public-b" }
+        - { Key: !Sub "${TagPrefix}:project", Value: "kiro-remote-crew" }
+
+  PrivateSubnetA:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref Vpc
+      CidrBlock: 10.20.128.0/20
+      AvailabilityZone: !Select [0, !GetAZs ""]
+      Tags:
+        - { Key: "Name", Value: !Sub "${TagPrefix}-kiro-remote-crew-private-a" }
+        - { Key: !Sub "${TagPrefix}:project", Value: "kiro-remote-crew" }
+
+  PrivateSubnetB:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref Vpc
+      CidrBlock: 10.20.144.0/20
+      AvailabilityZone: !Select [1, !GetAZs ""]
+      Tags:
+        - { Key: "Name", Value: !Sub "${TagPrefix}-kiro-remote-crew-private-b" }
+        - { Key: !Sub "${TagPrefix}:project", Value: "kiro-remote-crew" }
+
+  # --- Public routing: both public subnets egress straight to the IGW.
+  PublicRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref Vpc
+      Tags:
+        - { Key: "Name", Value: !Sub "${TagPrefix}-kiro-remote-crew-public" }
+
+  PublicDefaultRoute:
+    Type: AWS::EC2::Route
+    DependsOn: IgwAttachment
+    Properties:
+      RouteTableId: !Ref PublicRouteTable
+      DestinationCidrBlock: 0.0.0.0/0
+      GatewayId: !Ref InternetGateway
+
+  PublicSubnetARouteAssoc:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      RouteTableId: !Ref PublicRouteTable
+      SubnetId: !Ref PublicSubnetA
+
+  PublicSubnetBRouteAssoc:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      RouteTableId: !Ref PublicRouteTable
+      SubnetId: !Ref PublicSubnetB
+
+  # --- Private routing AZ-a: default route through the fck-nat ENI.
+  PrivateRouteTableA:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref Vpc
+      Tags:
+        - { Key: "Name", Value: !Sub "${TagPrefix}-kiro-remote-crew-private-a" }
+
+  PrivateDefaultRouteA:
+    Type: AWS::EC2::Route
+    Properties:
+      RouteTableId: !Ref PrivateRouteTableA
+      DestinationCidrBlock: 0.0.0.0/0
+      # Route through the fck-nat instance's primary ENI. Using NetworkInterfaceId
+      # (not InstanceId) keeps the route valid across a stop/start of the NAT.
+      NetworkInterfaceId: !Ref FckNatEni
+
+  PrivateSubnetARouteAssoc:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      RouteTableId: !Ref PrivateRouteTableA
+      SubnetId: !Ref PrivateSubnetA
+
+  # --- Private routing AZ-b: LOCAL ROUTES ONLY (no NAT route yet). AZ-b is wired
+  #     but not live. To extend to multi-AZ: add a second fck-nat in PublicSubnetB
+  #     and a 0.0.0.0/0 route here pointing at its ENI. Left out in V1 to keep the
+  #     demo to one NAT (the AZ-redundant version is stated in docs, not built).
+  PrivateRouteTableB:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref Vpc
+      Tags:
+        - { Key: "Name", Value: !Sub "${TagPrefix}-kiro-remote-crew-private-b" }
+
+  PrivateSubnetBRouteAssoc:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      RouteTableId: !Ref PrivateRouteTableB
+      SubnetId: !Ref PrivateSubnetB
+
+  # --- fck-nat: a single t4g.nano doing source/dest-disabled NAT for AZ-a's
+  #     private subnet. SourceDestCheck:false is what lets it forward traffic.
+  FckNatSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: !Sub "${TagPrefix} kiro-remote-crew fck-nat"
+      VpcId: !Ref Vpc
+      SecurityGroupIngress:
+        - IpProtocol: "-1"
+          CidrIp: 10.20.0.0/16
+          Description: Allow all traffic from within the VPC (NAT forwarding)
+      SecurityGroupEgress:
+        - IpProtocol: "-1"
+          CidrIp: 0.0.0.0/0
+          Description: Allow all outbound
+      Tags:
+        - { Key: "Name", Value: !Sub "${TagPrefix}-kiro-remote-crew-fck-nat" }
+
+  FckNatEni:
+    Type: AWS::EC2::NetworkInterface
+    Properties:
+      SubnetId: !Ref PublicSubnetA
+      GroupSet: [!Ref FckNatSecurityGroup]
+      SourceDestCheck: false
+      Description: fck-nat primary ENI (private-subnet-a default route target)
+      Tags:
+        - { Key: "Name", Value: !Sub "${TagPrefix}-kiro-remote-crew-fck-nat" }
+
+  FckNatInstance:
+    Type: AWS::EC2::Instance
+    Properties:
+      InstanceType: !Ref FckNatInstanceType
+      ImageId: !Ref FckNatAmiId
+      NetworkInterfaces:
+        - DeviceIndex: 0
+          NetworkInterfaceId: !Ref FckNatEni
+      MetadataOptions:
+        HttpTokens: required
+        HttpPutResponseHopLimit: 2
+        HttpEndpoint: enabled
+      Tags:
+        - { Key: "Name", Value: !Sub "${TagPrefix}-kiro-remote-crew-fck-nat" }
+        - { Key: !Sub "${TagPrefix}:project", Value: "kiro-remote-crew" }
+        - { Key: !Sub "${TagPrefix}:managed-by", Value: "cloudformation" }
+
+  # A public IP for the NAT is REQUIRED for egress (it is the door to the IGW).
+  FckNatEip:
+    Type: AWS::EC2::EIP
+    Properties:
+      Domain: vpc
+      Tags:
+        - { Key: "Name", Value: !Sub "${TagPrefix}-kiro-remote-crew-fck-nat" }
+
+  FckNatEipAssoc:
+    Type: AWS::EC2::EIPAssociation
+    Properties:
+      AllocationId: !GetAtt FckNatEip.AllocationId
+      NetworkInterfaceId: !Ref FckNatEni
+
+Outputs:
+  VpcId:
+    Value: !Ref Vpc
+    Export: { Name: !Sub "${AWS::StackName}-VpcId" }
+  VpcCidr:
+    Value: !GetAtt Vpc.CidrBlock
+    Export: { Name: !Sub "${AWS::StackName}-VpcCidr" }
+  PublicSubnetAId:
+    Value: !Ref PublicSubnetA
+    Export: { Name: !Sub "${AWS::StackName}-PublicSubnetAId" }
+  PublicSubnetBId:
+    Value: !Ref PublicSubnetB
+    Export: { Name: !Sub "${AWS::StackName}-PublicSubnetBId" }
+  PrivateSubnetAId:
+    Value: !Ref PrivateSubnetA
+    Export: { Name: !Sub "${AWS::StackName}-PrivateSubnetAId" }
+  PrivateSubnetBId:
+    Value: !Ref PrivateSubnetB
+    Export: { Name: !Sub "${AWS::StackName}-PrivateSubnetBId" }

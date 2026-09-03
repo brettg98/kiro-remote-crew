@@ -1,0 +1,74 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: "kiro-remote-crew — customer-managed KMS CMK for EBS root-volume encryption."
+
+Parameters:
+  TagPrefix:
+    Type: String
+    Default: co
+    AllowedPattern: "^[a-z][a-z0-9]{0,15}$"
+    Description: >-
+      Lowercase namespace prefix. Prefixes cosmetic/fleet tag keys and resource
+      names. NOTE: the ABAC match below uses a FIXED, UNPREFIXED key
+      ("project"), which the instance role's matching tag also uses — so
+      TagPrefix does NOT need to agree across stacks for the key policy to work.
+
+Resources:
+  Cmk:
+    Type: AWS::KMS::Key
+    Properties:
+      Description: !Sub "${TagPrefix} kiro-remote-crew EBS root-volume CMK"
+      EnableKeyRotation: true
+      KeySpec: SYMMETRIC_DEFAULT
+      KeyUsage: ENCRYPT_DECRYPT
+      KeyPolicy:
+        Version: "2012-10-17"
+        Id: kiro-remote-crew-cmk
+        Statement:
+          # Account root retains full admin over the key (standard CMK pattern;
+          # lets IAM policies in the account delegate key administration).
+          - Sid: AccountRootAdmin
+            Effect: Allow
+            Principal: { AWS: !Sub "arn:aws:iam::${AWS::AccountId}:root" }
+            Action: kms:*
+            Resource: "*"
+          # EBS use, granted by CONDITION not by principal ARN — this is what
+          # breaks the circular import. Any principal in this account carrying
+          # the ABAC tag project = kiro-remote-crew, acting THROUGH the EC2
+          # service (kms:ViaService), may use the key for volume encryption.
+          # NOTE: this ABAC match key is a FIXED, UNPREFIXED literal ("project")
+          # — not ${TagPrefix}:project. A CloudFormation condition-map KEY cannot
+          # be built with !Sub (a tagged-scalar key deserializes to a dict, which
+          # the AWS CLI refuses with "unhashable type: dict"), and the value
+          # "kiro-remote-crew" already makes the match unique, so the prefix on
+          # THIS key buys nothing. The instance role sets a matching fixed
+          # "project = kiro-remote-crew" tag (see iam.yaml). TagPrefix still
+          # prefixes every cosmetic/fleet tag and all resource names.
+          - Sid: EbsUseByTaggedPrincipalViaEc2
+            Effect: Allow
+            Principal: { AWS: !Sub "arn:aws:iam::${AWS::AccountId}:root" }
+            Action:
+              - kms:Decrypt
+              - kms:GenerateDataKeyWithoutPlaintext
+              - kms:CreateGrant
+              - kms:DescribeKey
+            Resource: "*"
+            Condition:
+              StringEquals:
+                kms:ViaService: !Sub "ec2.${AWS::Region}.amazonaws.com"
+                aws:PrincipalTag/project: "kiro-remote-crew"
+
+  CmkAlias:
+    Type: AWS::KMS::Alias
+    Properties:
+      AliasName: !Sub "alias/${TagPrefix}-kiro-remote-crew"
+      TargetKeyId: !Ref Cmk
+
+Outputs:
+  CmkArn:
+    Description: ARN of the CMK (compute.yaml imports this for the root volume).
+    Value: !GetAtt Cmk.Arn
+    Export: { Name: !Sub "${AWS::StackName}-CmkArn" }
+  CmkAlias:
+    Description: Human-readable alias for the CMK.
+    Value: !Ref CmkAlias
+    Export: { Name: !Sub "${AWS::StackName}-CmkAlias" }

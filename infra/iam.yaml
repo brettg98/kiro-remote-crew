@@ -1,0 +1,192 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: "kiro-remote-crew — IAM permissions boundary, instance role + profile, scheduler role."
+
+Parameters:
+  TagPrefix:
+    Type: String
+    Default: co
+    AllowedPattern: "^[a-z][a-z0-9]{0,15}$"
+    Description: >-
+      Lowercase namespace prefix for all co:-style tag keys and resource names.
+      MUST be identical across all five stacks so the CMK key-policy condition,
+      the instance role tag, and every tag key stay in lockstep.
+  Environment:
+    Type: String
+    Default: demo
+    Description: Value for the ${TagPrefix}:environment tag.
+  Owner:
+    Type: String
+    Default: ""
+    Description: Org/email for the ${TagPrefix}:owner tag (billing accountability).
+
+Resources:
+  # --- The permissions boundary: a CEILING, not a grant. Created here (by an
+  #     admin) separately from the role it caps. Two effective statements:
+  #       (a) the AmazonSSMManagedInstanceCore action set (SSM Session Manager);
+  #       (b) EBS-volume KMS use, gated by kms:ViaService = ec2 in this region.
+  #     Even a leaked deploy credential that inlines admin onto the role is
+  #     capped to the intersection of the role's policy and this boundary.
+  #     NOTE: no s3:GetObject and no secretsmanager:GetSecretValue anywhere —
+  #     the box installs by public git clone and authenticates by device-code
+  #     login, so it needs neither.
+  PermissionsBoundary:
+    Type: AWS::IAM::ManagedPolicy
+    Properties:
+      ManagedPolicyName: !Sub "${TagPrefix}-kiro-remote-boundary"
+      Description: >-
+        Immutable ceiling for the kiro-remote-crew instance role: SSM Session
+        Manager + EBS-volume KMS use only.
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: SsmCore
+            Effect: Allow
+            Action:
+              - ssm:UpdateInstanceInformation
+              - ssmmessages:CreateControlChannel
+              - ssmmessages:CreateDataChannel
+              - ssmmessages:OpenControlChannel
+              - ssmmessages:OpenDataChannel
+              - ec2messages:AcknowledgeMessage
+              - ec2messages:DeleteMessage
+              - ec2messages:FailMessage
+              - ec2messages:GetEndpoint
+              - ec2messages:GetMessages
+              - ec2messages:SendReply
+            Resource: "*"
+          - Sid: EbsKmsViaEc2
+            Effect: Allow
+            Action:
+              - kms:Decrypt
+              - kms:GenerateDataKeyWithoutPlaintext
+              - kms:CreateGrant
+            Resource: "*"
+            Condition:
+              StringEquals:
+                kms:ViaService: !Sub "ec2.${AWS::Region}.amazonaws.com"
+
+  # --- Instance role: trusts EC2, carries SSM core, capped by the boundary,
+  #     and holds the same-conditioned KMS statement so the encrypted root
+  #     volume can attach. Carries a fixed, UNPREFIXED "project = kiro-remote-crew"
+  #     tag (below) so the CMK key policy's aws:PrincipalTag/project condition
+  #     matches regardless of TagPrefix.
+  InstanceRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "${TagPrefix}-kiro-remote-instance"
+      PermissionsBoundary: !Ref PermissionsBoundary
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal: { Service: ec2.amazonaws.com }
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore
+      Policies:
+        - PolicyName: EbsKmsViaEc2
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - kms:Decrypt
+                  - kms:GenerateDataKeyWithoutPlaintext
+                  - kms:CreateGrant
+                Resource: "*"
+                Condition:
+                  StringEquals:
+                    kms:ViaService: !Sub "ec2.${AWS::Region}.amazonaws.com"
+      Tags:
+        # Fixed, UNPREFIXED ABAC tag — this is what the CMK key policy's
+        # aws:PrincipalTag/project condition matches (see kms.yaml). Kept
+        # separate from the prefixed cosmetic tag below so a fork changing
+        # TagPrefix never breaks the KMS grant.
+        - { Key: "project", Value: "kiro-remote-crew" }
+        - { Key: !Sub "${TagPrefix}:project", Value: "kiro-remote-crew" }
+        - { Key: !Sub "${TagPrefix}:managed-by", Value: "cloudformation" }
+        - { Key: !Sub "${TagPrefix}:environment", Value: !Ref Environment }
+
+  InstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      InstanceProfileName: !Sub "${TagPrefix}-kiro-remote-instance"
+      Roles: [!Ref InstanceRole]
+
+  # --- Scheduler role: assumed by EventBridge Scheduler, scoped to starting the
+  #     two SSM automation documents lifecycle.yaml targets and to start/stop of
+  #     any instance carrying this project's tag. Consumed by lifecycle.yaml via
+  #     the SchedulerRoleArn export. Kept here so "all IAM lives in iam.yaml".
+  SchedulerRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "${TagPrefix}-kiro-remote-scheduler"
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal: { Service: scheduler.amazonaws.com }
+            Action: sts:AssumeRole
+            Condition:
+              StringEquals:
+                aws:SourceAccount: !Ref AWS::AccountId
+      Policies:
+        - PolicyName: StartStopViaSsm
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Sid: StartSsmAutomation
+                Effect: Allow
+                Action: ssm:StartAutomationExecution
+                Resource:
+                  - !Sub "arn:aws:ssm:${AWS::Region}::automation-definition/AWS-StartEC2Instance:*"
+                  - !Sub "arn:aws:ssm:${AWS::Region}::automation-definition/AWS-StopEC2Instance:*"
+              - Sid: StartStopInstances
+                Effect: Allow
+                Action:
+                  - ec2:StartInstances
+                  - ec2:StopInstances
+                Resource: "*"
+                Condition:
+                  StringEquals:
+                    # Fixed, UNPREFIXED ABAC key — matches the fixed "project"
+                    # tag the compute stack sets on the instance. A condition-map
+                    # KEY cannot be built with !Sub (tagged-scalar key -> dict ->
+                    # AWS CLI "unhashable type: dict"), and the value already
+                    # scopes the match, so no prefix is needed here.
+                    aws:ResourceTag/project: "kiro-remote-crew"
+              - Sid: PassRoleToSsm
+                Effect: Allow
+                Action: iam:PassRole
+                Resource: "*"
+                Condition:
+                  StringEquals:
+                    iam:PassedToService: ssm.amazonaws.com
+      Tags:
+        - { Key: !Sub "${TagPrefix}:project", Value: "kiro-remote-crew" }
+        - { Key: !Sub "${TagPrefix}:managed-by", Value: "cloudformation" }
+
+Outputs:
+  BoundaryArn:
+    Description: ARN of the permissions boundary managed policy.
+    Value: !Ref PermissionsBoundary
+    Export: { Name: !Sub "${AWS::StackName}-BoundaryArn" }
+  InstanceRoleArn:
+    Description: ARN of the instance role.
+    Value: !GetAtt InstanceRole.Arn
+    Export: { Name: !Sub "${AWS::StackName}-InstanceRoleArn" }
+  InstanceProfileArn:
+    Description: ARN of the instance profile (for a LaunchTemplate, if ever used).
+    Value: !GetAtt InstanceProfile.Arn
+    Export: { Name: !Sub "${AWS::StackName}-InstanceProfileArn" }
+  InstanceProfileName:
+    Description: >-
+      NAME of the instance profile. compute.yaml imports THIS (not the ARN) —
+      AWS::EC2::Instance's bare IamInstanceProfile field takes the profile name;
+      an ARN is rejected as "Invalid IAM Instance Profile name".
+    Value: !Ref InstanceProfile
+    Export: { Name: !Sub "${AWS::StackName}-InstanceProfileName" }
+  SchedulerRoleArn:
+    Description: ARN of the scheduler role (lifecycle.yaml imports this).
+    Value: !GetAtt SchedulerRole.Arn
+    Export: { Name: !Sub "${AWS::StackName}-SchedulerRoleArn" }

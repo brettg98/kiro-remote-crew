@@ -1,0 +1,359 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: "kiro-remote-crew — EC2 host in a private subnet, SSM-only, no SSH."
+
+Parameters:
+  # --- Cross-stack wiring: the names of the upstream stacks, so this template
+  #     resolves their exports (which are named "${StackName}-Export").
+  IamStackName:
+    Type: String
+    Default: kiro-remote-iam
+    Description: Name of the deployed iam.yaml stack (for Fn::ImportValue).
+  KmsStackName:
+    Type: String
+    Default: kiro-remote-kms
+    Description: Name of the deployed kms.yaml stack.
+  VpcStackName:
+    Type: String
+    Default: kiro-remote-vpc
+    Description: Name of the deployed vpc.yaml stack.
+
+  # --- Required: who this box belongs to. Deploy fails without it (no default).
+  Developer:
+    Type: String
+    AllowedPattern: "^[A-Za-z0-9][A-Za-z0-9._-]{0,62}$"
+    Description: >-
+      REQUIRED. The developer this box is assigned to. Drives the
+      ${TagPrefix}:developer tag and the Name tag (kiro-remote-crew-<Developer>).
+
+  TagPrefix:
+    Type: String
+    Default: co
+    AllowedPattern: "^[a-z][a-z0-9]{0,15}$"
+    Description: Lowercase namespace prefix. MUST match the value passed to iam/kms.
+  Environment:
+    Type: String
+    Default: demo
+    Description: Value for the ${TagPrefix}:environment tag.
+  Owner:
+    Type: String
+    Default: ""
+    Description: Org/email for the ${TagPrefix}:owner tag.
+  InstanceName:
+    Type: String
+    Default: ""
+    Description: Optional human label for the ${TagPrefix}:instance-name tag.
+  ScheduleEnabled:
+    Type: String
+    Default: "true"
+    AllowedValues: ["true", "false"]
+    Description: >-
+      Recorded on the instance as ${TagPrefix}:schedule-enabled — reflects
+      whether lifecycle.yaml's auto-shutdown schedule is intended for this box.
+
+  InstanceType:
+    Type: String
+    Default: m7g.2xlarge
+    Description: EC2 instance type (16 GB RAM floor; default = balanced tier).
+  Architecture:
+    Type: String
+    Default: arm64
+    AllowedValues: [arm64, x86_64]
+    Description: CPU architecture; selects the matching Amazon Linux 2023 AMI.
+  VolumeSizeGb:
+    Type: Number
+    Default: 60
+    MinValue: 20
+    MaxValue: 1000
+    Description: gp3 root volume size in GiB (CMK-encrypted).
+  DashboardPort:
+    Type: Number
+    Default: 5476
+    MinValue: 1024
+    MaxValue: 65535
+    Description: Port the gateway listens on; connect.sh port-forwards to it.
+  KirocrewRepo:
+    Type: String
+    Default: https://github.com/kirodotdev/KiroCrew.git
+    AllowedPattern: "^[A-Za-z0-9_.:/@+-]{1,255}$"
+    Description: Public git repo to clone (the sole install source).
+  KirocrewRef:
+    Type: String
+    Default: main
+    AllowedPattern: "^[A-Za-z0-9_./-]{1,128}$"
+    Description: Git ref (branch/tag) to install.
+
+Mappings:
+  ArchToAmiParam:
+    arm64:
+      Param: /aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-arm64
+    x8664:
+      Param: /aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-x86_64
+
+Conditions:
+  IsArm: !Equals [!Ref Architecture, arm64]
+
+Resources:
+  # --- Egress-only security group. Zero ingress: SSM is outbound-only, there is
+  #     no SSH and no inbound of any kind. (No AllowSshCidr, no SshIngress.)
+  InstanceSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: kiro-remote-crew host - SSM-only, egress-only, zero ingress
+      VpcId:
+        Fn::ImportValue: !Sub "${VpcStackName}-VpcId"
+      SecurityGroupEgress:
+        - IpProtocol: "-1"
+          CidrIp: 0.0.0.0/0
+          Description: Allow all outbound (packages, SSM, kiro-cli/LLM endpoints)
+      Tags:
+        - { Key: "Name", Value: !Sub "kiro-remote-crew-${Developer}" }
+        - { Key: !Sub "${TagPrefix}:project", Value: "kiro-remote-crew" }
+
+  Instance:
+    Type: AWS::EC2::Instance
+    Properties:
+      InstanceType: !Ref InstanceType
+      ImageId: !Sub
+        - "{{resolve:ssm:${Param}}}"
+        - Param: !If
+            - IsArm
+            - !FindInMap [ArchToAmiParam, arm64, Param]
+            - !FindInMap [ArchToAmiParam, x8664, Param]
+      IamInstanceProfile:
+        # The bare IamInstanceProfile field takes the profile NAME, not the ARN
+        # (an ARN is rejected as "Invalid IAM Instance Profile name").
+        Fn::ImportValue: !Sub "${IamStackName}-InstanceProfileName"
+      # No public IP: this box lives in the private subnet and egresses via the
+      # fck-nat. SubnetId/SecurityGroupIds move under NetworkInterfaces because
+      # they are mutually exclusive with the top-level forms.
+      NetworkInterfaces:
+        - DeviceIndex: 0
+          AssociatePublicIpAddress: false
+          SubnetId:
+            Fn::ImportValue: !Sub "${VpcStackName}-PrivateSubnetAId"
+          GroupSet: [!Ref InstanceSecurityGroup]
+      # IMDSv2 required, hop limit 1: a prompt-injectable agent runs here, so an
+      # SSRF that reaches 169.254.169.254 must not read the role's STS creds.
+      MetadataOptions:
+        HttpTokens: required
+        HttpPutResponseHopLimit: 1
+        HttpEndpoint: enabled
+      BlockDeviceMappings:
+        - DeviceName: /dev/xvda
+          Ebs:
+            VolumeSize: !Ref VolumeSizeGb
+            VolumeType: gp3
+            Encrypted: true
+            KmsKeyId:
+              Fn::ImportValue: !Sub "${KmsStackName}-CmkArn"
+            DeleteOnTermination: true
+      Tags:
+        - { Key: "Name", Value: !Sub "kiro-remote-crew-${Developer}" }
+        # Fixed, UNPREFIXED ABAC tag — matches the scheduler role's
+        # aws:ResourceTag/project condition (see iam.yaml). Separate from the
+        # prefixed cosmetic tag below so changing TagPrefix never breaks the
+        # start/stop grant.
+        - { Key: "project", Value: "kiro-remote-crew" }
+        - { Key: !Sub "${TagPrefix}:project", Value: "kiro-remote-crew" }
+        - { Key: !Sub "${TagPrefix}:managed-by", Value: "cloudformation" }
+        - { Key: !Sub "${TagPrefix}:environment", Value: !Ref Environment }
+        - { Key: !Sub "${TagPrefix}:owner", Value: !Ref Owner }
+        - { Key: !Sub "${TagPrefix}:developer", Value: !Ref Developer }
+        - { Key: !Sub "${TagPrefix}:instance-name", Value: !Ref InstanceName }
+        - { Key: !Sub "${TagPrefix}:schedule-enabled", Value: !Ref ScheduleEnabled }
+      # --- Bootstrap. Structure is the reference template's, unchanged except:
+      #     the S3-source branch is removed (public git clone is the sole path),
+      #     and the KMS/private-subnet wiring is above. The rationale for every
+      #     non-obvious step (Logging, fail(), SELinux reboot, Swap, Node, kiro-cli,
+      #     dashboard build, systemd) is documented at length in the shipped
+      #     kirocrew-ec2.yaml; the whole block is ONE !Sub, so use only plain
+      #     "$var" bash expansions and the "!"-escaped literal form for genuine
+      #     dollar-brace literals.
+      UserData:
+        Fn::Base64: !Sub |
+          #!/bin/bash
+          set -u
+          exec >>/var/log/kirocrew-setup.log 2>&1
+          echo "=== KiroCrew bootstrap starting $(date -u) ==="
+
+          HANDLE="${WaitHandle}"
+          LOG=/var/log/kirocrew-setup.log
+          fail() {
+            echo "BOOTSTRAP FAILED: $1"
+            tail_ctx=$(tail -n 25 "$LOG" 2>/dev/null | tr -d '\r"\\' \
+              | grep -aviE 'Installing (npm|kirocrew and) depend|building React app' \
+              | tr '\n' '|' | tr -cd '\40-\176' | tail -c 900)
+            reason="$(printf '%s' "$1" | tr -d '"\\' | tr '\n' '|' | tr -cd '\40-\176') :: ...${!tail_ctx}"
+            /opt/aws/bin/cfn-signal -e 1 -r "$(echo "$reason" | head -c 1000)" "$HANDLE" || \
+              curl -s -X PUT -H 'Content-Type:' --data-binary \
+                "{\"Status\":\"FAILURE\",\"Reason\":\"$(echo "$reason" | head -c 1000)\",\"UniqueId\":\"kirocrew\",\"Data\":\"fail\"}" "$HANDLE" || true
+            exit 1
+          }
+
+          echo "--- suppressing AL2023 first-boot SELinux reboot ---"
+          rm -f /run/cloud-init-selinux-reboot 2>/dev/null || true
+          rm -f /etc/cloud/cloud.cfg.d/40_selinux-reboot.cfg 2>/dev/null || true
+          shutdown -c 2>/dev/null || true
+
+          RUN_USER=ec2-user
+          RUN_HOME=/home/$RUN_USER
+
+          echo "--- provisioning swap (headroom for the vite build) ---"
+          if [ ! -e /swapfile ] && [ "$(free -m | awk '/^Swap:/ {print $2}')" = "0" ]; then
+            ( fallocate -l 4G /swapfile || dd if=/dev/zero of=/swapfile bs=1M count=4096 ) 2>/dev/null \
+              && chmod 600 /swapfile && mkswap /swapfile >/dev/null 2>&1 && swapon /swapfile \
+              && echo '/swapfile none swap sw 0 0' >> /etc/fstab \
+              && echo "swap on: $(free -m | awk '/^Swap:/ {print $2}') MB" \
+              || echo "swap provisioning skipped (non-fatal)"
+          else
+            echo "swap already present or /swapfile exists - skipping"
+          fi
+
+          echo "--- installing system packages ---"
+          dnf install -y git tmux python3.11 python3.11-pip python3 python3-pip \
+            unzip tar gzip which \
+            || fail "essential package install failed (git/python3.11/unzip)"
+          dnf install -y ripgrep || echo "ripgrep unavailable (optional), continuing"
+
+          echo "--- installing Node.js ---"
+          NODE_MAJOR_MIN=22
+          command -v node >/dev/null 2>&1 || dnf install -y nodejs npm || true
+          NODE_MAJOR=$(node --version 2>/dev/null | sed -n 's/^v\([0-9][0-9]*\).*/\1/p' | head -1)
+          [ -n "$NODE_MAJOR" ] || NODE_MAJOR=0
+          if [ "$NODE_MAJOR" -lt "$NODE_MAJOR_MIN" ]; then
+            NODE_V=v22.12.0
+            case "$(uname -m)" in
+              aarch64) NODE_ARCH=linux-arm64; NODE_SHA=9e7905fdee722f9650a03ae644b51c4c6effd3b98ac93c588700072ab35c9ddb ;;
+              x86_64) NODE_ARCH=linux-x64; NODE_SHA=e05a4d65232ae2b27b3d77da2e368522fb46b923335b8e0d5f77624c32484044 ;;
+              *) fail "unsupported arch for Node install: $(uname -m)" ;;
+            esac
+            NODE_TARB=node-$NODE_V-$NODE_ARCH
+            echo "installing Node $NODE_V ($NODE_ARCH) from the official nodejs.org tarball"
+            curl --proto '=https' --tlsv1.2 -fsSL "https://nodejs.org/dist/$NODE_V/$NODE_TARB.tar.gz" -o /tmp/node.tar.gz || fail "Node download failed"
+            echo "$NODE_SHA  /tmp/node.tar.gz" | sha256sum -c - || fail "Node tarball checksum mismatch (possible tampering)"
+            tar -xzf /tmp/node.tar.gz -C /usr/local || fail "Node extract failed"
+            ln -sf /usr/local/$NODE_TARB/bin/node /usr/local/bin/node
+            ln -sf /usr/local/$NODE_TARB/bin/npm /usr/local/bin/npm
+            ln -sf /usr/local/$NODE_TARB/bin/npx /usr/local/bin/npx
+            hash -r 2>/dev/null || true
+            NODE_MAJOR=$(node --version 2>/dev/null | sed -n 's/^v\([0-9][0-9]*\).*/\1/p' | head -1)
+            [ -n "$NODE_MAJOR" ] || NODE_MAJOR=0
+          fi
+          [ "$NODE_MAJOR" -ge "$NODE_MAJOR_MIN" ] || fail "Node.js too old (major $NODE_MAJOR, need >=$NODE_MAJOR_MIN)"
+          echo "node: $(command -v node) $(node --version 2>/dev/null || echo missing)"
+          echo "npm:  $(command -v npm) $(npm --version 2>/dev/null || echo missing)"
+
+          echo "--- installing kiro-cli ---"
+          ARCH=$(uname -m)
+          if [ "$ARCH" = "aarch64" ]; then KIRO_URL="https://desktop-release.q.us-east-1.amazonaws.com/latest/kirocli-aarch64-linux-musl.zip"; else KIRO_URL="https://desktop-release.q.us-east-1.amazonaws.com/latest/kirocli-x86_64-linux-musl.zip"; fi
+          sudo -u $RUN_USER bash -lc "
+            set -e
+            cd \$HOME
+            curl --proto '=https' --tlsv1.2 -sSf '$KIRO_URL' -o kirocli.zip
+            unzip -o -q kirocli.zip
+            ./kirocli/install.sh --no-confirm || yes | ./kirocli/install.sh || true
+          " || echo 'kiro-cli install returned nonzero (verifying the binary below)'
+          sudo -u $RUN_USER bash -lc 'command -v kiro-cli >/dev/null 2>&1 || [ -x "$HOME/.local/bin/kiro-cli" ] || [ -x /usr/local/bin/kiro-cli ]' \
+            || fail "kiro-cli did not install (the chat backend would not work)"
+
+          echo "--- fetching + installing KiroCrew (public git clone) ---"
+          cat > /tmp/kcfetch.sh <<KCFETCH
+          #!/bin/bash
+          set -e
+          export PATH="/usr/local/bin:\$PATH"
+          cd "$RUN_HOME"
+          rm -rf kirocrew
+          echo "cloning ${KirocrewRepo}@${KirocrewRef}"
+          # \`--\` ends option parsing so the URL can't read as a git flag.
+          git clone --depth 1 --branch "${KirocrewRef}" -- "${KirocrewRepo}" kirocrew
+          cd kirocrew
+          export KIROCREW_REQUIRE_FRONTEND=1
+          if ! bash install.sh --voice; then
+            echo "install.sh failed on first attempt - settling then retrying once"
+            sleep 20
+            bash install.sh --voice
+          fi
+          KCFETCH
+          chmod +x /tmp/kcfetch.sh
+          chown $RUN_USER /tmp/kcfetch.sh
+          sudo -u $RUN_USER bash /tmp/kcfetch.sh || fail "kirocrew install.sh failed"
+
+          echo "--- verifying the dashboard SPA was actually built ---"
+          DIST_INDEX="$RUN_HOME/kirocrew/src/kiro_crew/static/dist/index.html"
+          if [ ! -f "$DIST_INDEX" ]; then
+            fe_err="$(grep -aiE 'npm error|npm ERR|error TS[0-9]|vite|Killed|Cannot find module|ENOSPC|no space left|out of memory|FATAL ERROR|Skipping frontend build' "$LOG" 2>/dev/null | tr -d '\r"\\' | tail -n 12 | tr '\n' '|' | tail -c 500)"
+            if [ -z "$fe_err" ]; then
+              fe_err="<none captured; check /var/log/kirocrew-setup.log on the instance>"
+            fi
+            fail "dashboard frontend build missing (no static/dist). Build errors: $fe_err"
+          fi
+
+          echo "--- installing the systemd service ---"
+          sudo -u $RUN_USER bash -lc "
+            export PATH=\$HOME/.local/bin:\$PATH
+            kirocrew setup --agent-only || true
+          " || true
+
+          KIROCREW_BIN=$(sudo -u $RUN_USER bash -lc 'command -v kirocrew || echo $HOME/.local/bin/kirocrew')
+          cat > /etc/systemd/system/kirocrew.service <<UNIT
+          [Unit]
+          Description=KiroCrew AI Agent Gateway
+          After=network-online.target
+          Wants=network-online.target
+
+          [Service]
+          Type=simple
+          User=$RUN_USER
+          ExecStart=$KIROCREW_BIN gateway
+          Restart=on-failure
+          RestartSec=10
+          WorkingDirectory=$RUN_HOME
+          Environment=HOME=$RUN_HOME
+          Environment=PATH=$RUN_HOME/.local/bin:/usr/local/bin:/usr/bin:/bin
+          Environment=KIROCREW_PORT=${DashboardPort}
+
+          [Install]
+          WantedBy=multi-user.target
+          UNIT
+          systemctl daemon-reload
+          systemctl enable --now kirocrew.service || fail "could not start kirocrew.service"
+
+          echo "--- waiting for the gateway to answer on 127.0.0.1:${DashboardPort} ---"
+          ok=0
+          for i in $(seq 1 60); do
+            if curl -fsS -o /dev/null http://127.0.0.1:${DashboardPort}/ 2>/dev/null; then ok=1; break; fi
+            sleep 5
+          done
+          [ "$ok" = "1" ] || fail "gateway did not become healthy within 5 minutes"
+
+          echo "=== KiroCrew bootstrap complete $(date -u) ==="
+          /opt/aws/bin/cfn-signal -e 0 -r "kirocrew healthy" "$HANDLE" || \
+            curl -s -X PUT -H 'Content-Type:' --data-binary \
+              "{\"Status\":\"SUCCESS\",\"Reason\":\"kirocrew healthy\",\"UniqueId\":\"kirocrew\",\"Data\":\"ok\"}" "$HANDLE" || true
+
+  WaitHandle:
+    Type: AWS::CloudFormation::WaitConditionHandle
+
+  WaitCondition:
+    Type: AWS::CloudFormation::WaitCondition
+    DependsOn: Instance
+    Properties:
+      Handle: !Ref WaitHandle
+      Timeout: "1500"
+      Count: 1
+
+Outputs:
+  InstanceId:
+    Description: EC2 instance id (SSM target; lifecycle.yaml imports this).
+    Value: !Ref Instance
+    Export: { Name: !Sub "${AWS::StackName}-InstanceId" }
+  Region:
+    Description: Region the stack was deployed to.
+    Value: !Ref AWS::Region
+  DashboardPort:
+    Description: The gateway port connect.sh should forward to.
+    Value: !Ref DashboardPort
+    Export: { Name: !Sub "${AWS::StackName}-DashboardPort" }
+  Developer:
+    Description: The developer this box is assigned to.
+    Value: !Ref Developer

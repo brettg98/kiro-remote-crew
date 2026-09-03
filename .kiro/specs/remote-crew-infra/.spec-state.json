@@ -1,0 +1,79 @@
+{
+  "decisions": [
+    {
+      "id": "auth-default-path",
+      "title": "Which auth path should the solution wire and document?",
+      "options": ["Manual device-code login over SSM (free, wired, sole happy path)", "KIRO_API_KEY in Secrets Manager (paid, unattended, wired)"],
+      "recommended": "Manual device-code login over SSM (free, wired, sole happy path)",
+      "answer": "Manual device-code login over SSM (free, wired, sole happy path)"
+    },
+    {
+      "id": "instance-tier-default",
+      "title": "Which instance tier should be the template's default InstanceType?",
+      "options": ["balanced m7g.2xlarge (8/32, ~$57/mo weekday stop-start)", "light t4g.xlarge (4/16, cheapest that clears the 16GB floor)"],
+      "recommended": "balanced m7g.2xlarge (8/32, ~$57/mo weekday stop-start)",
+      "answer": "balanced m7g.2xlarge (8/32, ~$57/mo weekday stop-start)"
+    },
+    {
+      "id": "template-structure",
+      "title": "How should the CloudFormation templates be split and wired?",
+      "options": ["Five templates iam/kms/vpc/compute/lifecycle, cross-stack Export/ImportValue", "Fewer templates or nested stacks"],
+      "recommended": "Five templates iam/kms/vpc/compute/lifecycle, cross-stack Export/ImportValue",
+      "answer": "Five templates iam/kms/vpc/compute/lifecycle, cross-stack Export/ImportValue"
+    },
+    {
+      "id": "cmk",
+      "title": "Include a customer-managed KMS key for EBS encryption?",
+      "options": ["Yes, own kms.yaml template, granted by kms:ViaService condition", "No, use the default aws/ebs key"],
+      "recommended": "Yes, own kms.yaml template, granted by kms:ViaService condition",
+      "answer": "Yes, own kms.yaml template, granted by kms:ViaService condition"
+    },
+    {
+      "id": "vpc-multi-az",
+      "title": "How should the VPC handle multiple AZs?",
+      "options": ["Multi-AZ subnets authored, only AZ-a live (extend additively later)", "Single AZ with a commented second-NAT block"],
+      "recommended": "Multi-AZ subnets authored, only AZ-a live (extend additively later)",
+      "answer": "Multi-AZ subnets authored, only AZ-a live (extend additively later)"
+    },
+    {
+      "id": "auto-shutdown",
+      "title": "How should the instance be kept from running idle, with easy manual control?",
+      "options": ["Three mechanisms: 8-5 ET M-F schedule + CloudWatch CPU idle-stop (<3% / 15 min) + start.sh/stop.sh on-demand", "Schedule only"],
+      "recommended": "Three mechanisms: 8-5 ET M-F schedule + CloudWatch CPU idle-stop (<3% / 15 min) + start.sh/stop.sh on-demand",
+      "answer": "Three mechanisms: 8-5 ET M-F schedule + CloudWatch CPU idle-stop (<3% / 15 min) + start.sh/stop.sh on-demand"
+    },
+    {
+      "id": "tagging",
+      "title": "What tagging strategy, especially for developer-to-instance mapping?",
+      "options": ["co:-prefixed lowercase keys; required Developer param drives co:developer + Name", "Unprefixed tags"],
+      "recommended": "co:-prefixed lowercase keys; required Developer param drives co:developer + Name",
+      "answer": "co:-prefixed lowercase keys; required Developer param drives co:developer + Name"
+    },
+    {
+      "id": "tag-prefix-param",
+      "title": "Should the customer tag prefix be hardcoded or a parameter?",
+      "options": ["TagPrefix parameter (default co) in all five templates + CMK alias/boundary name", "Hardcode co:"],
+      "recommended": "TagPrefix parameter (default co) in all five templates + CMK alias/boundary name",
+      "answer": "TagPrefix parameter (default co) in all five templates + CMK alias/boundary name"
+    },
+    {
+      "id": "source-bucket",
+      "title": "Keep the reference template's S3 SourceBucket install path?",
+      "options": ["Cut it entirely — public git clone is the sole install source", "Keep S3-source path"],
+      "recommended": "Cut it entirely — public git clone is the sole install source",
+      "answer": "Cut it entirely — public git clone is the sole install source"
+    }
+  ],
+  "phase": "execution",
+  "phaseStatus": {
+    "requirements": "approved",
+    "design": "approved",
+    "tasks": "approved",
+    "execution": "complete"
+  },
+  "blocking": "None. All 15 tasks executed and checked. Awaiting live smoke test in an AWS account (operator action, not a coding task) and git init/commit + push of the public repo.",
+  "context": {
+    "template": "Five CloudFormation templates iam.yaml/kms.yaml/vpc.yaml/compute.yaml/lifecycle.yaml, cross-stack refs, modelled on shipped kirocrew-ec2.yaml; device-code auth only; m7g.2xlarge default; CMK-encrypted EBS; multi-AZ one-live VPC; lifecycle (schedule + idle-stop) split out; co: tagging",
+    "tasks": "15 ordered tasks: (1) restructure infra to 5 templates, (2-6) author iam/kms/vpc/compute/lifecycle .yaml, (7-10) deploy/connect/start+stop/teardown scripts, (11-14) prerequisites/architecture/verification/README docs, (15) final audit. Each carries checkbox subtasks, requirement tags, and a verification step."
+  }
+}

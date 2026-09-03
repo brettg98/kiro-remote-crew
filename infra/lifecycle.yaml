@@ -1,0 +1,139 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: "kiro-remote-crew — business-hours schedule and CPU idle-stop alarm."
+
+Parameters:
+  ComputeStackName:
+    Type: String
+    Default: kiro-remote-compute
+    Description: Name of the deployed compute.yaml stack (for the InstanceId import).
+  IamStackName:
+    Type: String
+    Default: kiro-remote-iam
+    Description: Name of the deployed iam.yaml stack (for the scheduler role import).
+  TagPrefix:
+    Type: String
+    Default: co
+    AllowedPattern: "^[a-z][a-z0-9]{0,15}$"
+    Description: Lowercase namespace prefix (kept for consistency across stacks).
+
+  ScheduleEnabled:
+    Type: String
+    Default: "true"
+    AllowedValues: ["true", "false"]
+    Description: Create the business-hours start/stop schedule.
+  StartCron:
+    Type: String
+    Default: "cron(0 8 ? * MON-FRI *)"
+    Description: When to start the box (in ScheduleTimezone).
+  StopCron:
+    Type: String
+    Default: "cron(0 17 ? * MON-FRI *)"
+    Description: Hard backstop stop time (in ScheduleTimezone).
+  ScheduleTimezone:
+    Type: String
+    Default: America/New_York
+    Description: IANA timezone the two crons are evaluated in.
+
+  IdleStopEnabled:
+    Type: String
+    Default: "true"
+    AllowedValues: ["true", "false"]
+    Description: Create the CloudWatch CPU idle-stop alarm.
+  IdleCpuThreshold:
+    Type: Number
+    Default: 3
+    MinValue: 1
+    MaxValue: 100
+    Description: >-
+      CPU% below which the box is considered idle. Kiro Crew work is CPU-bound,
+      so <3% for the window below reliably means "nobody is working."
+  IdlePeriods:
+    Type: Number
+    Default: 3
+    MinValue: 1
+    MaxValue: 24
+    Description: >-
+      Consecutive 5-minute periods under the threshold before stopping
+      (default 3 = 15 minutes). Raise it if a long quiet single-threaded wait
+      trips the stop; a stopped box costs nothing and restarts in ~1 min.
+
+Conditions:
+  HasSchedule: !Equals [!Ref ScheduleEnabled, "true"]
+  HasIdleStop: !Equals [!Ref IdleStopEnabled, "true"]
+
+Resources:
+  # --- (a) Business-hours schedule. Targets the AWS-managed SSM automation
+  #     documents via the imported scheduler role — no Lambda, no code on the box.
+  StartSchedule:
+    Type: AWS::Scheduler::Schedule
+    Condition: HasSchedule
+    Properties:
+      Name: !Sub "${TagPrefix}-kiro-remote-start"
+      Description: Start the kiro-remote-crew box at the start of the workday.
+      FlexibleTimeWindow: { Mode: "OFF" }
+      ScheduleExpression: !Ref StartCron
+      ScheduleExpressionTimezone: !Ref ScheduleTimezone
+      Target:
+        Arn: !Sub "arn:aws:scheduler:::aws-sdk:ssm:startAutomationExecution"
+        RoleArn:
+          Fn::ImportValue: !Sub "${IamStackName}-SchedulerRoleArn"
+        Input: !Sub
+          - '{"DocumentName":"AWS-StartEC2Instance","Parameters":{"InstanceId":["${InstanceId}"]}}'
+          - InstanceId:
+              Fn::ImportValue: !Sub "${ComputeStackName}-InstanceId"
+
+  StopSchedule:
+    Type: AWS::Scheduler::Schedule
+    Condition: HasSchedule
+    Properties:
+      Name: !Sub "${TagPrefix}-kiro-remote-stop"
+      Description: Hard 5 PM backstop stop for the kiro-remote-crew box.
+      FlexibleTimeWindow: { Mode: "OFF" }
+      ScheduleExpression: !Ref StopCron
+      ScheduleExpressionTimezone: !Ref ScheduleTimezone
+      Target:
+        Arn: !Sub "arn:aws:scheduler:::aws-sdk:ssm:startAutomationExecution"
+        RoleArn:
+          Fn::ImportValue: !Sub "${IamStackName}-SchedulerRoleArn"
+        Input: !Sub
+          - '{"DocumentName":"AWS-StopEC2Instance","Parameters":{"InstanceId":["${InstanceId}"]}}'
+          - InstanceId:
+              Fn::ImportValue: !Sub "${ComputeStackName}-InstanceId"
+
+  # --- (b) Idle auto-stop. Native alarm -> EC2 stop action, no Lambda.
+  IdleAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Condition: HasIdleStop
+    Properties:
+      AlarmName: !Sub "${TagPrefix}-kiro-remote-idle-stop"
+      AlarmDescription: !Sub "Stop the box after ${IdlePeriods}x5min under ${IdleCpuThreshold}% CPU."
+      Namespace: AWS/EC2
+      MetricName: CPUUtilization
+      Dimensions:
+        - Name: InstanceId
+          Value:
+            Fn::ImportValue: !Sub "${ComputeStackName}-InstanceId"
+      Statistic: Average
+      Period: 300
+      EvaluationPeriods: !Ref IdlePeriods
+      Threshold: !Ref IdleCpuThreshold
+      ComparisonOperator: LessThanThreshold
+      # A quiet box reports no datapoints could keep the alarm from firing; treat
+      # missing data as breaching so a truly idle box still stops.
+      TreatMissingData: breaching
+      AlarmActions:
+        - !Sub "arn:aws:automate:${AWS::Region}:ec2:stop"
+
+Outputs:
+  StartScheduleName:
+    Condition: HasSchedule
+    Description: Name of the start schedule (diagnostics).
+    Value: !Ref StartSchedule
+  StopScheduleName:
+    Condition: HasSchedule
+    Description: Name of the stop schedule (diagnostics).
+    Value: !Ref StopSchedule
+  IdleAlarmName:
+    Condition: HasIdleStop
+    Description: Name of the idle-stop alarm (diagnostics).
+    Value: !Ref IdleAlarm
