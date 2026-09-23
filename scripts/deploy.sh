@@ -23,6 +23,10 @@ Options:
   --owner <o>            Owner tag value (org/email).
   --no-schedule          Deploy lifecycle with the business-hours schedule off.
   --no-idle-stop         Deploy lifecycle with the CPU idle-stop alarm off.
+  --gitlab-hosts <list>  Self-managed GitLab hosts for KiroCrew's allowlist,
+                         comma-separated bare host[:port]. Defaults to
+                         GITLAB_HOSTS in the repo-root .env (gitignored), so
+                         org-specific hostnames never need committing.
   -h, --help             This help.
 EOF
   exit "${1:-2}"
@@ -37,6 +41,8 @@ ENVIRONMENT=""
 OWNER=""
 SCHEDULE_ENABLED="true"
 IDLE_STOP_ENABLED="true"
+GITLAB_HOSTS=""
+GITLAB_HOSTS_SET=""
 
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -49,6 +55,7 @@ while [ $# -gt 0 ]; do
     --owner)          OWNER="${2:-}"; shift 2 ;;
     --no-schedule)    SCHEDULE_ENABLED="false"; shift ;;
     --no-idle-stop)   IDLE_STOP_ENABLED="false"; shift ;;
+    --gitlab-hosts)   GITLAB_HOSTS="${2:-}"; GITLAB_HOSTS_SET=1; shift 2 ;;
     -h|--help)        usage 0 ;;
     *) echo "Unknown argument: $1" >&2; usage 2 ;;
   esac
@@ -70,6 +77,13 @@ LIFECYCLE_STACK="${TAG_PREFIX}-kiro-remote-lifecycle"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 INFRA_DIR="$(cd "$SCRIPT_DIR/../infra" && pwd)"
+
+# GitLab allowlist default from the gitignored .env. Read the one key rather
+# than sourcing the file, so .env is data and never executes.
+ENV_FILE="$SCRIPT_DIR/../.env"
+if [ -z "$GITLAB_HOSTS_SET" ] && [ -f "$ENV_FILE" ]; then
+  GITLAB_HOSTS="$(sed -n 's/^GITLAB_HOSTS=//p' "$ENV_FILE" | tail -1 | tr -d "\"' ")"
+fi
 
 # Common args threaded onto every aws call.
 AWS_COMMON=()
@@ -139,6 +153,7 @@ deploy_stack "$COMPUTE_STACK" compute.yaml \
     "KmsStackName=$KMS_STACK" \
     "VpcStackName=$VPC_STACK" \
     "ScheduleEnabled=$SCHEDULE_ENABLED" \
+    "GitlabHosts=$GITLAB_HOSTS" \
     ${INSTANCE_TYPE:+"InstanceType=$INSTANCE_TYPE"} \
     ${ENVIRONMENT:+"Environment=$ENVIRONMENT"} \
     ${OWNER:+"Owner=$OWNER"}
