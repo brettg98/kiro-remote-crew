@@ -44,6 +44,18 @@ An ordered checklist to prove the build actually works. Substitute your
    step 8). Do this first: connecting before it is done only ever shows you a
    "not signed in" page.
 
+   If you use a self-managed GitLab, sign `glab` in too, from the same shell. The
+   bootstrap installs `glab` but never holds a token:
+   ```
+   glab auth login --hostname <your-gitlab-host>
+   ```
+   Its token also lives on the EBS volume and has the same stop/start behaviour.
+   The host must also be on KiroCrew's allowlist, which `deploy.sh
+   --gitlab-hosts` (or `GITLAB_HOSTS=` in the repo-root `.env`) sets. That list
+   is read at first boot only: changing it later changes the stack's UserData
+   but not a running box, so either rebuild the box or add the host to
+   `dashboard.gitlab_hosts` in `~/.kiro/crew/config.json` by hand.
+
 5. **Connect and use it — and prove the work ran on the box.**
    `scripts/connect.sh` opens the SSM port-forward: it binds a local port on your
    laptop and tunnels it to the port the Kiro Crew **gateway** on the EC2 host is

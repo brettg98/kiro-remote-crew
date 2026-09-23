@@ -81,6 +81,14 @@ Parameters:
     Default: main
     AllowedPattern: "^[A-Za-z0-9_./-]{1,128}$"
     Description: Git ref (branch/tag) to install.
+  GitlabHosts:
+    Type: String
+    Default: ""
+    AllowedPattern: "^([A-Za-z0-9.-]+(:[0-9]{1,5})?(,[A-Za-z0-9.-]+(:[0-9]{1,5})?)*)?$"
+    Description: >-
+      Optional. Comma-separated self-managed GitLab hosts (bare host[:port], no
+      scheme or path) merged into KiroCrew's dashboard.gitlab_hosts allowlist on
+      every gateway start. gitlab.com is always allowed and needs no entry.
 
 Mappings:
   ArchToAmiParam:
@@ -243,6 +251,22 @@ Resources:
           echo "node: $(command -v node) $(node --version 2>/dev/null || echo missing)"
           echo "npm:  $(command -v npm) $(npm --version 2>/dev/null || echo missing)"
 
+          echo "--- installing glab (GitLab CLI; the Changes panel shells out to it) ---"
+          # Pinned upstream release tarball, verified like Node above. Checksums
+          # from the release's checksums.txt. Authentication is left to the
+          # developer (glab auth login over SSM); no token goes in UserData.
+          GLAB_V=1.119.0
+          case "$(uname -m)" in
+            aarch64) GLAB_ARCH=linux_arm64; GLAB_SHA=8540c4afbe63c4da023c15bfce15f2f1ef9cc1afe4a6fd6812c426b9eeab073b ;;
+            x86_64) GLAB_ARCH=linux_amd64; GLAB_SHA=4d83375d202ffa634eaf627fd9272b610fa599f20f5b711f55d770583eca2b84 ;;
+            *) fail "unsupported arch for glab install: $(uname -m)" ;;
+          esac
+          curl --proto '=https' --tlsv1.2 -fsSL "https://gitlab.com/gitlab-org/cli/-/releases/v$GLAB_V/downloads/glab_${!GLAB_V}_$GLAB_ARCH.tar.gz" -o /tmp/glab.tar.gz || fail "glab download failed"
+          echo "$GLAB_SHA  /tmp/glab.tar.gz" | sha256sum -c - || fail "glab tarball checksum mismatch (possible tampering)"
+          mkdir -p /tmp/glab && tar -xzf /tmp/glab.tar.gz -C /tmp/glab || fail "glab extract failed"
+          install -m 0755 /tmp/glab/bin/glab /usr/local/bin/glab || fail "glab install failed"
+          echo "glab: $(/usr/local/bin/glab --version 2>/dev/null | head -1)"
+
           echo "--- installing kiro-cli ---"
           ARCH=$(uname -m)
           if [ "$ARCH" = "aarch64" ]; then KIRO_URL="https://desktop-release.q.us-east-1.amazonaws.com/latest/kirocli-aarch64-linux-musl.zip"; else KIRO_URL="https://desktop-release.q.us-east-1.amazonaws.com/latest/kirocli-x86_64-linux-musl.zip"; fi
@@ -294,6 +318,39 @@ Resources:
             kirocrew setup --agent-only || true
           " || true
 
+          echo "--- installing the GitLab host allowlist merge (runs before every gateway start) ---"
+          # Adds KIROCREW_GITLAB_HOSTS to dashboard.gitlab_hosts and never removes
+          # an entry, so a host added by hand on the box survives. Runs on every
+          # start in case KiroCrew rewrites config.json on upgrade. Leaves an
+          # unparseable config alone rather than overwrite it.
+          cat > /usr/local/bin/kirocrew-gitlab-hosts <<'MERGE'
+          #!/usr/bin/env python3
+          import json, os, pathlib, sys, tempfile
+
+          hosts = [h.strip().lower() for h in os.environ.get("KIROCREW_GITLAB_HOSTS", "").split(",") if h.strip()]
+          if not hosts:
+              sys.exit(0)
+          path = pathlib.Path.home() / ".kiro" / "crew" / "config.json"
+          data = json.loads(path.read_text()) if path.exists() else {}
+          dashboard = data.setdefault("dashboard", {})
+          current = dashboard.get("gitlab_hosts")
+          current = current if isinstance(current, list) else []
+          merged = current + [h for h in hosts if h not in current]
+          if merged == dashboard.get("gitlab_hosts"):
+              sys.exit(0)
+          dashboard["gitlab_hosts"] = merged
+          path.parent.mkdir(parents=True, exist_ok=True)
+          fd, tmp = tempfile.mkstemp(dir=path.parent, prefix=".config.json.")
+          with os.fdopen(fd, "w") as f:
+              json.dump(data, f, indent=2)
+              f.write("\n")
+          if path.exists():
+              os.chmod(tmp, path.stat().st_mode & 0o777)
+          os.replace(tmp, path)
+          print("gitlab_hosts now: " + ", ".join(merged))
+          MERGE
+          chmod 0755 /usr/local/bin/kirocrew-gitlab-hosts
+
           KIROCREW_BIN=$(sudo -u $RUN_USER bash -lc 'command -v kirocrew || echo $HOME/.local/bin/kirocrew')
           cat > /etc/systemd/system/kirocrew.service <<UNIT
           [Unit]
@@ -304,6 +361,8 @@ Resources:
           [Service]
           Type=simple
           User=$RUN_USER
+          # "-": a failed merge is logged but never blocks the gateway.
+          ExecStartPre=-/usr/local/bin/kirocrew-gitlab-hosts
           ExecStart=$KIROCREW_BIN gateway
           Restart=on-failure
           RestartSec=10
@@ -311,6 +370,7 @@ Resources:
           Environment=HOME=$RUN_HOME
           Environment=PATH=$RUN_HOME/.local/bin:/usr/local/bin:/usr/bin:/bin
           Environment=KIROCREW_PORT=${DashboardPort}
+          Environment=KIROCREW_GITLAB_HOSTS=${GitlabHosts}
 
           [Install]
           WantedBy=multi-user.target
