@@ -138,9 +138,22 @@ Resources:
               - Sid: StartSsmAutomation
                 Effect: Allow
                 Action: ssm:StartAutomationExecution
+                # SSM authorizes this call against the DOCUMENT ARN (no account
+                # field for AWS-owned docs), not automation-definition. Read from
+                # CloudTrail's AccessDenied on 2026-09-24 (#7): "...on resource:
+                # arn:aws:ssm:ca-central-1::document/AWS-StopEC2Instance".
                 Resource:
-                  - !Sub "arn:aws:ssm:${AWS::Region}::automation-definition/AWS-StartEC2Instance:*"
-                  - !Sub "arn:aws:ssm:${AWS::Region}::automation-definition/AWS-StopEC2Instance:*"
+                  - !Sub "arn:aws:ssm:${AWS::Region}::document/AWS-StartEC2Instance"
+                  - !Sub "arn:aws:ssm:${AWS::Region}::document/AWS-StopEC2Instance"
+              # The documents run with this role's permissions (no
+              # AutomationAssumeRole is passed), and aws:changeInstanceState
+              # reads instance state while it waits. Read-only, no resource scope.
+              - Sid: DescribeInstanceState
+                Effect: Allow
+                Action:
+                  - ec2:DescribeInstances
+                  - ec2:DescribeInstanceStatus
+                Resource: "*"
               - Sid: StartStopInstances
                 Effect: Allow
                 Action:
