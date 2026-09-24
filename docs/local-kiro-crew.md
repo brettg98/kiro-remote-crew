@@ -8,16 +8,22 @@ gateway opens the tunnel itself by running
 
 ## The instance settings
 
-Add the box as a remote instance with connection method **SSM**. Your local Kiro
-Crew stores it in `~/.kiro/crew/instances.json` with these fields:
+In your local Kiro Crew, open **Settings → Remote Crew → Add remote crew** and
+fill in:
 
-| Field | Value |
-|---|---|
-| `connection_method` | `ssm` |
-| `ssm_target` | the instance id (`deploy.sh` prints it at the end) |
-| `aws_profile` | the AWS CLI profile that can `ssm:StartSession` on the box |
-| `aws_region` | the region you deployed to |
-| `ssm_run_as` | `ec2-user` (the user the remote gateway runs as) |
+| Form field | Value | Stored in `instances.json` as |
+|---|---|---|
+| Connection method | **AWS SSM Session Manager** | `connection_method: ssm` |
+| SSM target (instance id) | the instance id (`deploy.sh` prints it at the end) | `ssm_target` |
+| AWS profile | the AWS CLI profile that can `ssm:StartSession` on the box | `aws_profile` |
+| AWS region | the region you deployed to | `aws_region` |
+| Remote user | `ec2-user` (the default; the user the remote gateway runs as) | `ssm_run_as` |
+| Remote port | `5476` (the default), or your `DashboardPort` if you changed it | `remote_port` |
+
+The form marks **AWS profile** and **AWS region** as optional, and a blank
+profile falls back to the default credential chain of the Kiro Crew process.
+Fill both in: the gateway runs in the background, not in the shell where you
+set your profile.
 
 Your laptop also needs the AWS CLI and the Session Manager plugin, the same as
 `connect.sh` (see [`prerequisites.md`](prerequisites.md)).
