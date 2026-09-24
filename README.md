@@ -53,6 +53,11 @@ scripts/teardown.sh                    # remove lifecycle + compute (iam/kms/vpc
 `--tag-prefix`. After `deploy.sh`, do the one-time device-code login on the box
 (see [`docs/verification.md`](docs/verification.md)).
 
+Running Kiro Crew on your laptop as well? Add the box as a remote instance
+instead of using `connect.sh`: see
+[`docs/local-kiro-crew.md`](docs/local-kiro-crew.md), including the SSO-expiry
+error that `assume` does not fix.
+
 ## Cost
 
 A balanced box (`m7g.2xlarge`, 8 vCPU / 32 GB) with stop/start on weekdays is
