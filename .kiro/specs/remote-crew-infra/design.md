@@ -364,7 +364,7 @@ re-minted by logging in again; the CMK survives for the next box.
   `Fn::ImportValue`s and `lifecycle` resolves the InstanceId; confirm `teardown`
   of `compute` is refused while `lifecycle` imports from it (and `vpc` while
   `compute` imports from it).
-- **Live smoke test** in co-demo (373530653551, ca-central-1) per
+- **Live smoke test** in a demo account per
   `docs/verification.md`: `CREATE_COMPLETE` → `describe-instance-information` →
   `connect.sh` → device-code login → run a query on the box → **stop/start and
   re-verify**.
