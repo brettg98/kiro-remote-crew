@@ -46,7 +46,11 @@ def text(x, y, s, size=15, color=INK, anchor="middle", weight="normal"):
     )
 
 
-def node(rel, cx, cy, name, *details):
+def node(rel, cx, cy, name, *details, backed=False):
+    # Outline-style icons are transparent inside; a white disc stops the lines
+    # and borders behind them showing through.
+    if backed:
+        parts.append(f'<circle cx="{cx}" cy="{cy}" r="34" fill="white"/>')
     icon(rel, cx, cy)
     text(cx, cy + 52, name)
     for i, d in enumerate(details):
@@ -108,6 +112,10 @@ group(55, 505, 190, 355, "lifecycle.yaml", "#545B64", dashed=True)
 
 # Edges first, so icons and labels sit on top of them
 line([(1548, 166), (1324, 196)], IN, "start-session (HTTPS)", (1360, 158))
+# SSM to host runs above AZ a's subnets and drops in right of every group
+# label, so it crosses no text.
+line([(1256, 200), (700, 200), (700, 334), (486, 334)], IN,
+     "session, over the channel the agent opened", (790, 218))
 line([(482, 350), (914, 350)], OUTB)
 line([(986, 350), (1114, 350)], OUTB, "all egress,\nincl. SSM agent", (998, 310))
 line([(1170, 326), (1252, 222)], OUTB, "SSM agent channel,\nopened outbound",
@@ -138,7 +146,7 @@ node("storage/elastic-block-store-ebs-volume.png", 450, 490, "Root volume",
      "60 GB gp3, encrypted")
 node("compute/ec2-instance.png", 950, 350, "fck-nat",
      "EC2 t4g.nano + Elastic IP")
-node("network/internet-gateway.png", 1150, 350, "Internet gateway")
+node("network/internet-gateway.png", 1150, 350, "Internet gateway", backed=True)
 node("management/systems-manager.png", 1290, 200, "SSM", "Session Manager")
 node("general/client.png", 1580, 160, "Developer laptop", "connect.sh")
 node("general/internet-alt1.png", 1580, 420, "Internet",
