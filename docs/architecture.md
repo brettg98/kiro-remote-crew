@@ -7,6 +7,16 @@ Manager, so **IAM decides who connects and CloudTrail records it**. Nothing
 initiates into the VPC — the host has no public IP and its security group has
 zero ingress rules.
 
+![kiro-remote-crew architecture](images/architecture.png)
+
+Green is the only way in: a session the developer opens through SSM, carried
+over a channel the host's SSM agent opened outbound. Orange is the only way out,
+shared by everything on the box including that agent, which is why the fck-nat
+is a single point of failure (see [Network](#network)). Dashed lines are control,
+not traffic. The diagram is generated from
+[`images/architecture.py`](images/architecture.py); edit that and re-run it
+rather than editing the PNG.
+
 ## Five stacks, wired by cross-stack references
 
 The project is five CloudFormation templates joined by `Export` /

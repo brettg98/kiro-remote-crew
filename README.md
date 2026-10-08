@@ -10,6 +10,8 @@ you can see how the remote mechanism actually works, then the one-command versio
 
 ## What it builds
 
+![kiro-remote-crew architecture](docs/images/architecture.png)
+
 Five CloudFormation stacks, wired by cross-stack `Export` / `Fn::ImportValue`
 (not nested stacks — the import dependency enforces deploy order automatically):
 
