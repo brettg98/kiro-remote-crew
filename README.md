@@ -16,7 +16,7 @@ it matters for a box you keep:
 
 | | `kirocrew cloud launch` | this repo |
 |---|---|---|
-| Network | the account's default VPC, so a public subnet and a public IP (no inbound rules) | its own VPC; private subnet, no public IP, egress through one fck-nat |
+| Network | the account's default VPC: a NAT-routed subnet if it has one, otherwise (the usual default VPC) a public subnet with a public IP and no inbound rules | its own VPC; private subnet, no public IP, egress through one fck-nat |
 | Stopping when idle | manual (`kirocrew cloud stop`) | business-hours schedule plus a CPU idle-stop alarm |
 | Root volume key | AWS-managed EBS key | customer-managed KMS key with a scoped key policy |
 | Install source | your local source, uploaded to S3 (role gets `s3:GetObject`) | public git clone; no S3 access |
