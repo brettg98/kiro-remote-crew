@@ -142,9 +142,14 @@ Resources:
                 # field for AWS-owned docs), not automation-definition. Read from
                 # CloudTrail's AccessDenied on 2026-09-24 (#7): "...on resource:
                 # arn:aws:ssm:ca-central-1::document/AWS-StopEC2Instance".
+                # It ALSO authorizes against the execution it is about to create.
+                # With only the documents granted, every scheduled run failed
+                # with "...on resource: arn:aws:ssm:<region>:<account>:
+                # automation-execution/*" (#24).
                 Resource:
                   - !Sub "arn:aws:ssm:${AWS::Region}::document/AWS-StartEC2Instance"
                   - !Sub "arn:aws:ssm:${AWS::Region}::document/AWS-StopEC2Instance"
+                  - !Sub "arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:automation-execution/*"
               # The documents run with this role's permissions (no
               # AutomationAssumeRole is passed), and aws:changeInstanceState
               # reads instance state while it waits. Read-only, no resource scope.
