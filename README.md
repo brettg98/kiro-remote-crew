@@ -5,8 +5,28 @@ your laptop — the agent work executes on the box, not on your Mac. No public I
 no SSH key, no open inbound ports: access is over AWS SSM Session Manager, so IAM
 decides who connects and CloudTrail records it.
 
-Companion build for the *Let's Build* video. Recorded walkthrough, hand-built so
-you can see how the remote mechanism actually works, then the one-command version.
+Companion build for the *Let's Build* video, hand-built so you can see how the
+remote mechanism actually works.
+
+## Why not `kirocrew cloud launch`?
+
+Kiro Crew ships a one-command launcher that also puts the crew on EC2 behind
+SSM. It is the right choice for trying Kiro Crew out. This build differs where
+it matters for a box you keep:
+
+| | `kirocrew cloud launch` | this repo |
+|---|---|---|
+| Network | the account's default VPC, so a public subnet and a public IP (no inbound rules) | its own VPC; private subnet, no public IP, egress through one fck-nat |
+| Stopping when idle | manual (`kirocrew cloud stop`) | business-hours schedule plus a CPU idle-stop alarm |
+| Root volume key | AWS-managed EBS key | customer-managed KMS key with a scoped key policy |
+| Install source | your local source, uploaded to S3 (role gets `s3:GetObject`) | public git clone; no S3 access |
+
+Both are SSM-only with zero ingress by default and enforce IMDSv2. The launcher
+can target a private subnet with `--subnet`, but you build that network first.
+The launcher's permissions boundary is created separately by a different
+principal, which is the production pattern; this repo creates it in `iam.yaml`
+so the whole build deploys in one pass (see
+[`docs/architecture.md`](docs/architecture.md)).
 
 ## What it builds
 
