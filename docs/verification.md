@@ -91,8 +91,35 @@ An ordered checklist to prove the build actually works. Substitute your
 
 8. **Lifecycle checks.**
    - *Idle:* leave the box quiet; after 15 min under 3% CPU the CloudWatch alarm's
-     EC2 stop action fires and the instance stops. `start.sh` brings it back.
-   - *Schedule:* manually invoke the SSM `AWS-StopEC2Instance` automation (or wait
-     for the 5 PM ET stop) and confirm the box stops; the 8 AM schedule (or
-     `start.sh`) brings it back and the gateway returns via the systemd unit.
+     EC2 stop action fires and the instance stops. Then `start.sh` and leave it
+     quiet again: it must stop a **second** time. The alarm acts only on an
+     OK → ALARM transition, so a second stop is what proves it reset while the
+     box was down.
+   - *Schedule:* wait for a real scheduled run. Do **not** test this by running
+     the `AWS-StopEC2Instance` automation yourself: that uses your permissions,
+     not the scheduler role's, and passes even when the schedule cannot run.
+     After the 5 PM ET stop (or 8 AM start), confirm an execution exists and
+     succeeded:
+
+     ```bash
+     aws ssm describe-automation-executions \
+       --query "AutomationExecutionMetadataList[].[DocumentName,AutomationExecutionStatus,ExecutionStartTime]" \
+       --output table
+     ```
+
+     An empty list after a scheduled time means the schedule fired and failed.
+     Scheduler records that, and nothing else will tell you: the box just stays
+     in whatever state it was in.
+
+     ```bash
+     aws cloudwatch get-metric-statistics \
+       --namespace AWS/Scheduler --metric-name TargetErrorCount \
+       --dimensions Name=ScheduleGroup,Value=default \
+       --start-time <yesterday> --end-time <now> \
+       --period 3600 --statistics Sum --output table
+     ```
+
+     Any non-zero hour is a failed run. CloudTrail's `StartAutomationExecution`
+     events for the `<prefix>-kiro-remote-scheduler` role carry the exact
+     `AccessDenied` message, including the resource SSM refused.
    - *On-demand:* `stop.sh` → `start.sh` round-trips the box in ~1 min.
