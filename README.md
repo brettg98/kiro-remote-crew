@@ -23,7 +23,8 @@ Five CloudFormation stacks, wired by cross-stack `Export` / `Fn::ImportValue`
   otherwise be a circular cross-stack dependency).
 - **`infra/vpc.yaml`** — an explicit VPC (never the default) authored across two
   AZs with only AZ-a live, and a single [fck-nat](https://fck-nat.dev) instance
-  (~$3/mo vs ~$32/mo for a managed NAT Gateway) for private egress.
+  (~$7/mo with its public IP vs ~$37/mo plus data for a managed NAT Gateway)
+  for private egress.
 - **`infra/compute.yaml`** — the EC2 host in the **private** subnet (no public
   IP, egress-only security group, IMDSv2 enforced, CMK-encrypted root), reached
   only over SSM. A WaitCondition fails the stack loudly with the setup-log tail
@@ -60,10 +61,12 @@ error that `assume` does not fix.
 
 ## Cost
 
-A balanced box (`m7g.2xlarge`, 8 vCPU / 32 GB) with stop/start on weekdays is
-roughly **$57/month**, plus ~**$3/mo** for the fck-nat and ~**$1/mo** for the CMK.
-See [`docs/architecture.md`](docs/architecture.md) for the full tier table and the
-security/lifecycle rationale.
+About **$14/month** bills whether the box runs or not (fck-nat, its public IP,
+the EBS volumes, the KMS key). The default `m7g.2xlarge` adds $0.36 per hour it
+runs: about **$85/month** all in at the default schedule's ceiling, less with
+idle stop. Priced for ca-central-1; other regions differ. See
+[`docs/cost.md`](docs/cost.md) for the breakdown, other instance sizes and the
+assumptions.
 
 ## License
 
