@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# On-demand stop — park the box. A stopped box costs nothing (you still pay for
-# the EBS volume) and restarts in ~1 min via start.sh.
+# On-demand stop — park the box. Stopping drops the instance charge; the EBS
+# volume and the network's fixed costs still bill (docs/cost.md). Restarts in
+# ~1 min via start.sh.
 
 usage() {
   cat >&2 <<EOF

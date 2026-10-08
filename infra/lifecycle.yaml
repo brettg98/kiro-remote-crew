@@ -55,7 +55,8 @@ Parameters:
     Description: >-
       Consecutive 5-minute periods under the threshold before stopping
       (default 3 = 15 minutes). Raise it if a long quiet single-threaded wait
-      trips the stop; a stopped box costs nothing and restarts in ~1 min.
+      trips the stop; a stopped box drops the instance charge (EBS still
+      bills) and restarts in ~1 min.
 
 Conditions:
   HasSchedule: !Equals [!Ref ScheduleEnabled, "true"]

@@ -29,7 +29,7 @@ box is cheap to recreate.
 
 Explicit VPC (`10.20.0.0/16`), authored across **two AZs** so it is
 production-shaped from day one — but only AZ-a is live in V1. The public subnet
-holds a single **fck-nat** (`t4g.nano`, ~$3/mo) for egress; the workload lives in
+holds a single **fck-nat** (`t4g.nano`, ~$7/mo with its public IP) for egress; the workload lives in
 a **private** subnet with no public IP and routes out through the NAT. AZ-b's
 subnets are real (not commented blocks), so a later multi-AZ extension is
 additive: drop a second fck-nat in `PublicSubnetB` and add a default route to
@@ -51,7 +51,8 @@ mid-stack.
 **Honest tradeoff:** SSM is the **only** door, and it reaches the box *through*
 the fck-nat. If the NAT dies, the host goes dark. The box is disposable —
 recreate the compute stack (the network stack is separate for exactly this).
-Decoupling would use SSM interface VPC endpoints (~$22/mo, more than the fck-nat);
+Decoupling would use SSM interface VPC endpoints (~$24/mo for one AZ, more than
+the fck-nat);
 not built here, stated as future work.
 
 ## The permissions boundary
@@ -90,7 +91,8 @@ We break it so **neither template imports the other**:
 So three places — key policy, role, boundary — must agree on the `kms:ViaService`
 condition, and the instance-role tag must match the key policy's
 `aws:PrincipalTag` condition. A concrete "these must line up" lesson; get one
-wrong and the box fails to launch with an opaque volume-attach error. ~$1/mo.
+wrong and the box fails to launch with an opaque volume-attach error. $1/mo,
+rising to $3/mo over two yearly rotations (see [cost](cost.md)).
 
 ## Auth: device-code only
 
@@ -124,8 +126,8 @@ instance). All three are opt-out; you can always take manual control.
    concurrency) is CPU-bound: an idle dashboard connection barely moves CPU, while
    an active chat or running sub-agent holds the box up. Known edge: a long, quiet,
    single-threaded wait could dip under the floor — raise `IdlePeriods` if you hit
-   it. A stopped box costs nothing and restarts in ~1 min, so the failure mode is
-   cheap.
+   it. A stopped box restarts in ~1 min and drops the instance charge (its EBS
+   volume still bills), so the failure mode is cheap.
 3. **On-demand** — `scripts/start.sh` / `scripts/stop.sh` park and un-park the box
    in one command. `start.sh` waits for the instance to run and re-register with
    SSM before printing the connect hint.
@@ -158,13 +160,13 @@ aws ec2 describe-instances \
 
 ## Instance tiers
 
-| tier | type | vCPU/GB | ~$/mo 24×7 | ~$/mo weekday stop-start |
-|------|------|---------|-----------|--------------------------|
-| light | t4g.xlarge | 4/16 | ~96 | ~23 |
-| balanced | m7g.2xlarge | 8/32 | ~235 | **~57** |
-| power | m7g.4xlarge | 16/64 | ~470 | ~114 |
+| tier | type | vCPU/GB | instance $/mo 24×7 | instance $/mo at schedule ceiling |
+|------|------|---------|--------------------|-----------------------------------|
+| light | t4g.xlarge | 4/16 | ~107 | ~29 |
+| balanced | m7g.2xlarge | 8/32 | ~266 | **~71** |
+| power | m7g.4xlarge | 16/64 | ~531 | ~142 |
 
 16 GB floor: Kiro Crew uses ~10 GB with spikes. Tiers ladder by vCPU because
-sub-agent concurrency is CPU-bound. `m7g.2xlarge` on a weekday stop/start schedule
-(the default) lands around **$57/mo**, plus ~$3/mo for the fck-nat and ~$1/mo for
-the CMK.
+sub-agent concurrency is CPU-bound. These are instance hours only, ca-central-1
+on-demand. About $14/mo of fixed cost (fck-nat, its public IP, EBS, KMS) bills
+on top whether the box runs or not; see [cost](cost.md).
