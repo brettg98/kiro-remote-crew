@@ -173,6 +173,23 @@ Resources:
                     # AWS CLI "unhashable type: dict"), and the value already
                     # scopes the match, so no prefix is needed here.
                     aws:ResourceTag/project: "kiro-remote-crew"
+              # StartInstances attaches the encrypted root volume as the
+              # CALLER, so EC2 creates the KMS grant with this role's identity.
+              # Without it every scheduled start failed with
+              # Client.InvalidKMSKey, after CloudTrail logged "...not authorized
+              # to perform: kms:CreateGrant" (#30). Same statement as the
+              # instance role; the key policy also requires the fixed
+              # project tag set below.
+              - Sid: EbsKmsViaEc2
+                Effect: Allow
+                Action:
+                  - kms:Decrypt
+                  - kms:GenerateDataKeyWithoutPlaintext
+                  - kms:CreateGrant
+                Resource: "*"
+                Condition:
+                  StringEquals:
+                    kms:ViaService: !Sub "ec2.${AWS::Region}.amazonaws.com"
               - Sid: PassRoleToSsm
                 Effect: Allow
                 Action: iam:PassRole
@@ -181,6 +198,8 @@ Resources:
                   StringEquals:
                     iam:PassedToService: ssm.amazonaws.com
       Tags:
+        # Fixed, UNPREFIXED ABAC tag the CMK key policy matches (see kms.yaml).
+        - { Key: "project", Value: "kiro-remote-crew" }
         - { Key: !Sub "${TagPrefix}:project", Value: "kiro-remote-crew" }
         - { Key: !Sub "${TagPrefix}:managed-by", Value: "cloudformation" }
 
